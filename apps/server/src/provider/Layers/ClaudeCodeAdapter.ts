@@ -57,7 +57,7 @@ import type {
   Options as ClaudeQueryOptions,
 } from "@anthropic-ai/claude-agent-sdk";
 
-const PROVIDER: "claudeCode" = "claudeCode";
+const PROVIDER = "claudeCode" as const;
 
 export interface ClaudeCodeAdapterLiveOptions {
   readonly nativeEventLogger?: EventNdjsonLogger;
@@ -618,11 +618,10 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
         // Stop existing session
         const existing = getSession(threadId);
         if (existing && existing.status !== "closed") {
-          try {
-            existing.query.close();
-          } catch {
-            // SDK process may already be dead — ignore close errors
-          }
+          // SDK process may already be dead — ignore close errors
+          yield* Effect.sync(() => {
+            try { existing.query.close(); } catch { /* noop */ }
+          });
           existing.status = "closed";
           sessions.delete(threadId);
         }
@@ -919,7 +918,7 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
             turnId,
             createdAt: nowIso(),
             type: "turn.started",
-            payload: { ...(ctx.model ? { model: ctx.model } : {}) },
+            payload: ctx.model ? { model: ctx.model } : {},
           } as ProviderRuntimeEvent,
         ]);
 
@@ -996,11 +995,10 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
         const ctx = getSession(threadId);
         if (!ctx || ctx.status === "closed") return;
 
-        try {
-          ctx.query.close();
-        } catch {
-          // SDK process may already be dead — ignore close errors
-        }
+        // SDK process may already be dead — ignore close errors
+        yield* Effect.sync(() => {
+          try { ctx.query.close(); } catch { /* noop */ }
+        });
         ctx.status = "closed";
         ctx.updatedAt = nowIso();
         sessions.delete(threadId);
@@ -1026,6 +1024,7 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
       Effect.sync(() =>
         Array.from(sessions.values())
           .filter((ctx) => ctx.status !== "closed")
+          // eslint-disable-next-line no-map-spread -- conditional properties require spreads for correct typing
           .map((ctx) => ({
             provider: PROVIDER,
             status: ctx.status as "connecting" | "ready" | "running" | "error" | "closed",

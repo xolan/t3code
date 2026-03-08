@@ -1,6 +1,5 @@
 import { Fragment, type ReactNode, createElement, useEffect } from "react";
 import {
-  DEFAULT_MODEL_BY_PROVIDER,
   type ProviderKind,
   ThreadId,
   type OrchestrationReadModel,
