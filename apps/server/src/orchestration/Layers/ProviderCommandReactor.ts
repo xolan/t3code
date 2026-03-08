@@ -376,6 +376,7 @@ const make = Effect.gen(function* () {
     readonly messageId: string;
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
+    readonly provider?: ProviderKind;
   }) {
     if (!input.branch || !input.worktreePath) {
       return;
@@ -402,6 +403,7 @@ const make = Effect.gen(function* () {
         cwd,
         message: input.messageText,
         ...(attachments.length > 0 ? { attachments } : {}),
+        ...(input.provider ? { provider: input.provider } : {}),
       })
       .pipe(
         Effect.catch((error) =>
@@ -463,16 +465,15 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    if (event.payload.provider !== "claudeCode") {
-      yield* maybeGenerateAndRenameWorktreeBranchForFirstTurn({
-        threadId: event.payload.threadId,
-        branch: thread.branch,
-        worktreePath: thread.worktreePath,
-        messageId: message.id,
-        messageText: message.text,
-        ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-      }).pipe(Effect.forkScoped);
-    }
+    yield* maybeGenerateAndRenameWorktreeBranchForFirstTurn({
+      threadId: event.payload.threadId,
+      branch: thread.branch,
+      worktreePath: thread.worktreePath,
+      messageId: message.id,
+      messageText: message.text,
+      ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+      ...(event.payload.provider ? { provider: event.payload.provider } : {}),
+    }).pipe(Effect.forkScoped);
 
     yield* sendTurnForThread({
       threadId: event.payload.threadId,

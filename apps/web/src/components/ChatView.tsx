@@ -3579,6 +3579,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
           availableEditors={availableEditors}
           diffToggleShortcutLabel={diffPanelShortcutLabel}
           gitCwd={gitCwd}
+          provider={selectedProvider}
           diffOpen={diffOpen}
           onRunProjectScript={(script) => {
             void runProjectScript(script);
@@ -4280,6 +4281,7 @@ interface ChatHeaderProps {
   availableEditors: ReadonlyArray<EditorId>;
   diffToggleShortcutLabel: string | null;
   gitCwd: string | null;
+  provider: ProviderKind;
   diffOpen: boolean;
   onRunProjectScript: (script: ProjectScript) => void;
   onAddProjectScript: (input: NewProjectScriptInput) => Promise<void>;
@@ -4300,6 +4302,7 @@ const ChatHeader = memo(function ChatHeader({
   availableEditors,
   diffToggleShortcutLabel,
   gitCwd,
+  provider,
   diffOpen,
   onRunProjectScript,
   onAddProjectScript,
@@ -4347,7 +4350,7 @@ const ChatHeader = memo(function ChatHeader({
             openInCwd={openInCwd}
           />
         )}
-        {activeProjectName && <GitActionsControl gitCwd={gitCwd} activeThreadId={activeThreadId} />}
+        {activeProjectName && <GitActionsControl gitCwd={gitCwd} activeThreadId={activeThreadId} provider={provider} />}
         <Tooltip>
           <TooltipTrigger
             render={
