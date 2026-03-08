@@ -693,8 +693,14 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
         // We need a forward reference to ctx for the canUseTool callback
         let ctx: ClaudeSessionContext;
 
+        // Strip CLAUDECODE env var so the child process doesn't refuse to start
+        // (Claude Code has anti-nesting protection that checks for this variable).
+        const sanitizedEnv: Record<string, string | undefined> = { ...process.env };
+        delete sanitizedEnv.CLAUDECODE;
+
         const queryOptions: ClaudeQueryOptions = {
           cwd,
+          env: sanitizedEnv,
           ...(input.model ? { model: input.model } : {}),
           ...(binaryPath ? { pathToClaudeCodeExecutable: binaryPath } : {}),
           permissionMode,
