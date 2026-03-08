@@ -3,6 +3,7 @@ import {
   FolderIcon,
   GitPullRequestIcon,
   RocketIcon,
+  SettingsIcon,
   SquarePenIcon,
   TerminalIcon,
 } from "lucide-react";
@@ -1342,13 +1343,23 @@ export default function Sidebar() {
             </div>
           </>
         ) : (
-          <button
-            type="button"
-            className="flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-border py-2 text-xs text-muted-foreground/70 transition-colors duration-150 hover:border-ring hover:text-muted-foreground"
-            onClick={() => setAddingProject(true)}
-          >
-            + Add project
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="flex flex-1 items-center justify-center gap-1 rounded-md border border-dashed border-border py-2 text-xs text-muted-foreground/70 transition-colors duration-150 hover:border-ring hover:text-muted-foreground"
+              onClick={() => setAddingProject(true)}
+            >
+              + Add project
+            </button>
+            <button
+              type="button"
+              className="flex shrink-0 items-center justify-center rounded-md border border-dashed border-border p-2 text-muted-foreground/70 transition-colors duration-150 hover:border-ring hover:text-muted-foreground"
+              onClick={() => void navigate({ to: "/settings" })}
+              title="Settings"
+            >
+              <SettingsIcon className="size-3.5" />
+            </button>
+          </div>
         )}
       </SidebarFooter>
     </>
