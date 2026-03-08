@@ -4,11 +4,12 @@
   "private": true,
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "bun run --parallel dev:bundle dev:electron",
+    "dev": "bun run rebuild-native && bun run --parallel dev:bundle dev:electron",
     "dev:bundle": "tsdown --watch",
     "dev:electron": "bun run scripts/dev-electron.mjs",
-    "build": "tsdown",
-    "start": "bun run scripts/start-electron.mjs",
+    "build": "bun run rebuild-native && tsdown",
+    "start": "bun run rebuild-native && bun run scripts/start-electron.mjs",
+    "rebuild-native": "node scripts/rebuild-native-for-electron.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "smoke-test": "node scripts/smoke-test.mjs"
@@ -19,6 +20,7 @@
     "electron-updater": "^6.6.2"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.3",
     "@t3tools/contracts": "workspace:*",
     "@t3tools/shared": "workspace:*",
     "@types/node": "catalog:",
