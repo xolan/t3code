@@ -176,6 +176,7 @@ function isToolLifecycleItemType(itemType: string): boolean {
   return (
     itemType === "command_execution" ||
     itemType === "file_change" ||
+    itemType === "file_read" ||
     itemType === "mcp_tool_call" ||
     itemType === "dynamic_tool_call" ||
     itemType === "collab_agent_tool_call" ||
@@ -409,6 +410,44 @@ function runtimeEventToActivities(
             ...(event.payload.summary ? { detail: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
           },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "tool.progress": {
+      const toolName = event.payload.toolName ?? "Tool";
+      const elapsed = event.payload.elapsedSeconds;
+      const summary = elapsed !== undefined
+        ? `${toolName} running (${Math.round(elapsed)}s)`
+        : `${toolName} running`;
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "tool",
+          kind: "tool.progress",
+          summary,
+          payload: {
+            ...(event.payload.toolUseId ? { toolUseId: event.payload.toolUseId } : {}),
+            detail: toolName,
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "tool.summary": {
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "tool",
+          kind: "tool.summary",
+          summary: event.payload.summary,
+          payload: {},
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
         },

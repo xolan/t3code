@@ -127,8 +127,10 @@ interface ClaudeSessionContext {
   updatedAt: string;
   lastError: string | undefined;
   resumeCursor: unknown | undefined;
-  /** Whether streaming text/thinking deltas were received for the current turn. */
+  /** Whether streaming text/thinking deltas were received for the current segment. */
   hasStreamedContent: boolean;
+  /** Tool-use IDs already emitted via stream_event content_block_start. */
+  streamedToolIds: Set<string>;
   /** Monotonic counter for distinct assistant message segments within a turn. */
   assistantSegmentIndex: number;
 }
@@ -387,11 +389,13 @@ function mapAssistantMessage(
   }
 
   const segmentItemId = assistantSegmentItemId(ctx);
+  let hasTextContent = ctx.hasStreamedContent;
 
   for (const block of betaMessage.content) {
     if (block.type === "text") {
       // Skip text blocks that were already delivered via stream_event deltas
       if (!ctx.hasStreamedContent) {
+        hasTextContent = true;
         events.push({
           ...base,
           eventId: makeEventId(),
@@ -403,6 +407,7 @@ function mapAssistantMessage(
     } else if (block.type === "thinking") {
       // Skip thinking blocks that were already delivered via stream_event deltas
       if (!ctx.hasStreamedContent) {
+        hasTextContent = true;
         events.push({
           ...base,
           eventId: makeEventId(),
@@ -416,32 +421,39 @@ function mapAssistantMessage(
       }
     } else if (block.type === "tool_use") {
       const toolBlock = block as { id: string; name: string; input: unknown };
-      events.push({
-        ...base,
-        eventId: makeEventId(),
-        type: "item.started" as const,
-        itemId: RuntimeItemId.makeUnsafe(toolBlock.id),
-        payload: {
-          itemType: mapToolNameToItemType(toolBlock.name),
-          title: toolBlock.name,
-          data: { item: { type: toolBlock.name, input: toolBlock.input } },
-        },
-      } as ProviderRuntimeEvent);
+      // Skip tool starts already emitted via stream_event content_block_start
+      if (!ctx.streamedToolIds.has(toolBlock.id)) {
+        events.push({
+          ...base,
+          eventId: makeEventId(),
+          type: "item.started" as const,
+          itemId: RuntimeItemId.makeUnsafe(toolBlock.id),
+          payload: {
+            itemType: mapToolNameToItemType(toolBlock.name),
+            title: toolBlock.name,
+            data: { item: { type: toolBlock.name, input: toolBlock.input } },
+          },
+        } as ProviderRuntimeEvent);
+      }
     }
   }
 
-  // Emit item.completed so the ingestion layer finalizes this assistant message segment
-  events.push({
-    ...base,
-    eventId: makeEventId(),
-    itemId: segmentItemId,
-    type: "item.completed" as const,
-    payload: { itemType: "assistant_message" as const },
-  } as ProviderRuntimeEvent);
+  // Only emit assistant message completion if there was actual text content;
+  // tool-use-only segments don't need a visible message entry
+  if (hasTextContent) {
+    events.push({
+      ...base,
+      eventId: makeEventId(),
+      itemId: segmentItemId,
+      type: "item.completed" as const,
+      payload: { itemType: "assistant_message" as const },
+    } as ProviderRuntimeEvent);
+  }
 
   // Advance segment index so the next assistant message gets a distinct message ID
   ctx.assistantSegmentIndex++;
   ctx.hasStreamedContent = false;
+  ctx.streamedToolIds.clear();
 
   return events;
 }
@@ -488,6 +500,7 @@ function mapStreamEvent(
         event as { content_block?: { type: string; id?: string; name?: string } }
       ).content_block;
       if (contentBlock?.type === "tool_use" && contentBlock.id) {
+        ctx.streamedToolIds.add(contentBlock.id);
         return [
           {
             ...base,
@@ -536,11 +549,14 @@ function mapResultMessage(
 
 function mapToolNameToItemType(
   name: string,
-): "command_execution" | "file_change" | "mcp_tool_call" | "unknown" {
+): "command_execution" | "file_change" | "file_read" | "mcp_tool_call" | "web_search" | "unknown" {
   const lower = name.toLowerCase();
   if (lower === "bash" || lower === "execute" || lower.includes("command")) return "command_execution";
-  if (lower === "edit" || lower === "write" || lower.includes("file") || lower.includes("patch"))
+  if (lower === "edit" || lower === "write" || lower.includes("patch") || lower === "notebookedit")
     return "file_change";
+  if (lower === "read" || lower === "glob" || lower === "grep" || lower === "toolsearch")
+    return "file_read";
+  if (lower === "webfetch" || lower === "websearch") return "web_search";
   if (lower.startsWith("mcp__") || lower.startsWith("mcp_")) return "mcp_tool_call";
   return "unknown";
 }
@@ -799,6 +815,7 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
           lastError: undefined,
           resumeCursor: resumeInfo,
           hasStreamedContent: false,
+          streamedToolIds: new Set(),
           assistantSegmentIndex: 0,
         };
         sessions.set(threadId, ctx);
@@ -899,6 +916,7 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
         ctx.currentTurnId = turnId;
         ctx.status = "running";
         ctx.hasStreamedContent = false;
+        ctx.streamedToolIds.clear();
         ctx.assistantSegmentIndex = 0;
         ctx.updatedAt = nowIso();
 

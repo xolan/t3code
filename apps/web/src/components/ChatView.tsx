@@ -4456,7 +4456,11 @@ const ComposerPendingApprovalPanel = memo(function ComposerPendingApprovalPanel(
       ? "Command approval requested"
       : approval.requestKind === "file-read"
         ? "File-read approval requested"
-        : "File-change approval requested";
+        : approval.requestKind === "file-change"
+          ? "File-change approval requested"
+          : approval.detail
+            ? `Approval requested: ${approval.detail}`
+            : "Approval requested";
 
   return (
     <div className="px-4 py-3.5 sm:px-5 sm:py-4">
