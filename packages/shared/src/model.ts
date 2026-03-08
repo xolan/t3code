@@ -12,6 +12,7 @@ type CatalogProvider = keyof typeof MODEL_OPTIONS_BY_PROVIDER;
 
 const MODEL_SLUG_SET_BY_PROVIDER: Record<CatalogProvider, ReadonlySet<ModelSlug>> = {
   codex: new Set(MODEL_OPTIONS_BY_PROVIDER.codex.map((option) => option.slug)),
+  claudeCode: new Set(MODEL_OPTIONS_BY_PROVIDER.claudeCode.map((option) => option.slug)),
 };
 
 export function getModelOptions(provider: ProviderKind = "codex") {
@@ -73,6 +74,20 @@ export function getDefaultReasoningEffort(
   provider: ProviderKind = "codex",
 ): CodexReasoningEffort | null {
   return provider === "codex" ? "high" : null;
+}
+
+export function inferProviderFromModel(model: string | null | undefined): ProviderKind {
+  if (typeof model !== "string") return "codex";
+  const trimmed = model.trim();
+  if (!trimmed) return "codex";
+  for (const [provider, slugs] of Object.entries(MODEL_SLUG_SET_BY_PROVIDER) as Array<
+    [CatalogProvider, ReadonlySet<ModelSlug>]
+  >) {
+    if (provider === "codex") continue;
+    const normalized = normalizeModelSlug(trimmed, provider);
+    if (normalized && slugs.has(normalized)) return provider;
+  }
+  return "codex";
 }
 
 export { CODEX_REASONING_EFFORT_OPTIONS };
