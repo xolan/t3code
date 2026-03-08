@@ -603,7 +603,7 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
           new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId }),
         );
       }
-      if (session.status === "closed") {
+      if (session.status === "closed" || session.status === "error") {
         return Effect.fail(
           new ProviderAdapterSessionClosedError({ provider: PROVIDER, threadId }),
         );
@@ -892,11 +892,25 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
           } as ProviderRuntimeEvent,
         ]);
 
-        ctx.pushPrompt({
-          type: "user",
-          message: { role: "user", content: input.input ?? "" },
-          parent_tool_use_id: null,
-          session_id: ctx.sessionId ?? "",
+        yield* Effect.try({
+          try: () =>
+            ctx.pushPrompt({
+              type: "user",
+              message: { role: "user", content: input.input ?? "" },
+              parent_tool_use_id: null,
+              session_id: ctx.sessionId ?? "",
+            }),
+          catch: (error) => {
+            ctx.status = "error";
+            ctx.lastError = toMessage(error, "Failed to send prompt to Claude Code process");
+            ctx.updatedAt = nowIso();
+            return new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: input.threadId,
+              detail: ctx.lastError,
+              cause: error,
+            });
+          },
         });
 
         return {
