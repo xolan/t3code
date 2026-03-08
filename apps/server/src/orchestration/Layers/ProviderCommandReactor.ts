@@ -512,7 +512,38 @@ const make = Effect.gen(function* () {
     }
 
     // Orchestration turn ids are not provider turn ids, so interrupt by session.
-    yield* providerService.interruptTurn({ threadId: event.payload.threadId });
+    const interruptResult = yield* providerService
+      .interruptTurn({ threadId: event.payload.threadId })
+      .pipe(
+        Effect.as("ok" as const),
+        Effect.catch(() => Effect.succeed("failed" as const)),
+      );
+
+    // After a crash/restart the provider may have no active turn to interrupt,
+    // so no runtime events (turn.completed, session.exited) will fire to clear
+    // the stale "running" state. Emit a session-set to unblock the thread.
+    if (thread.session?.status === "running") {
+      const freshThread = yield* resolveThread(event.payload.threadId);
+      const stillRunning = freshThread?.session?.status === "running";
+      if (stillRunning) {
+        yield* setThreadSession({
+          threadId: event.payload.threadId,
+          session: {
+            threadId: event.payload.threadId,
+            status: interruptResult === "ok" ? "ready" : "error",
+            providerName: thread.session.providerName,
+            runtimeMode: thread.session.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+            activeTurnId: null,
+            lastError:
+              interruptResult === "failed"
+                ? "Turn interrupt failed after session recovery"
+                : null,
+            updatedAt: event.payload.createdAt,
+          },
+          createdAt: event.payload.createdAt,
+        });
+      }
+    }
   });
 
   const processApprovalResponseRequested = Effect.fnUntraced(function* (
