@@ -129,6 +129,8 @@ interface ClaudeSessionContext {
   resumeCursor: unknown | undefined;
   /** Whether streaming text/thinking deltas were received for the current turn. */
   hasStreamedContent: boolean;
+  /** Monotonic counter for distinct assistant message segments within a turn. */
+  assistantSegmentIndex: number;
 }
 
 // ── SDK Message → ProviderRuntimeEvent mapping ────────────────────────
@@ -366,6 +368,10 @@ function mapSystemMessage(
   }
 }
 
+function assistantSegmentItemId(ctx: ClaudeSessionContext): RuntimeItemId {
+  return RuntimeItemId.makeUnsafe(`assistant-segment-${ctx.assistantSegmentIndex}`);
+}
+
 function mapAssistantMessage(
   base: RuntimeEventBase,
   ctx: ClaudeSessionContext,
@@ -380,6 +386,8 @@ function mapAssistantMessage(
     ctx.resumeCursor = { resume: ctx.sessionId, resumeSessionAt: msg.uuid };
   }
 
+  const segmentItemId = assistantSegmentItemId(ctx);
+
   for (const block of betaMessage.content) {
     if (block.type === "text") {
       // Skip text blocks that were already delivered via stream_event deltas
@@ -387,6 +395,7 @@ function mapAssistantMessage(
         events.push({
           ...base,
           eventId: makeEventId(),
+          itemId: segmentItemId,
           type: "content.delta" as const,
           payload: { streamKind: "assistant_text" as const, delta: block.text },
         } as ProviderRuntimeEvent);
@@ -397,6 +406,7 @@ function mapAssistantMessage(
         events.push({
           ...base,
           eventId: makeEventId(),
+          itemId: segmentItemId,
           type: "content.delta" as const,
           payload: {
             streamKind: "reasoning_text" as const,
@@ -420,6 +430,19 @@ function mapAssistantMessage(
     }
   }
 
+  // Emit item.completed so the ingestion layer finalizes this assistant message segment
+  events.push({
+    ...base,
+    eventId: makeEventId(),
+    itemId: segmentItemId,
+    type: "item.completed" as const,
+    payload: { itemType: "assistant_message" as const },
+  } as ProviderRuntimeEvent);
+
+  // Advance segment index so the next assistant message gets a distinct message ID
+  ctx.assistantSegmentIndex++;
+  ctx.hasStreamedContent = false;
+
   return events;
 }
 
@@ -431,6 +454,8 @@ function mapStreamEvent(
   const event = msg.event;
   if (!event) return [];
 
+  const segmentItemId = assistantSegmentItemId(ctx);
+
   switch (event.type) {
     case "content_block_delta": {
       const delta = event.delta as { type: string; text?: string; thinking?: string };
@@ -439,6 +464,7 @@ function mapStreamEvent(
         return [
           {
             ...base,
+            itemId: segmentItemId,
             type: "content.delta" as const,
             payload: { streamKind: "assistant_text" as const, delta: delta.text },
           } as ProviderRuntimeEvent,
@@ -449,6 +475,7 @@ function mapStreamEvent(
         return [
           {
             ...base,
+            itemId: segmentItemId,
             type: "content.delta" as const,
             payload: { streamKind: "reasoning_text" as const, delta: delta.thinking },
           } as ProviderRuntimeEvent,
@@ -762,6 +789,7 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
           lastError: undefined,
           resumeCursor: resumeInfo,
           hasStreamedContent: false,
+          assistantSegmentIndex: 0,
         };
         sessions.set(threadId, ctx);
 
@@ -841,6 +869,7 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
         ctx.currentTurnId = turnId;
         ctx.status = "running";
         ctx.hasStreamedContent = false;
+        ctx.assistantSegmentIndex = 0;
         ctx.updatedAt = nowIso();
 
         if (input.model && input.model !== ctx.model) {
