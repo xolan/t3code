@@ -3,6 +3,7 @@ import {
   CommandId,
   EventId,
   type OrchestrationEvent,
+  type OrchestrationThread,
   type ProviderModelOptions,
   type ProviderKind,
   type ProviderStartOptions,
@@ -206,6 +207,64 @@ const make = Effect.gen(function* () {
   const resolveThread = Effect.fnUntraced(function* (threadId: ThreadId) {
     const readModel = yield* orchestrationEngine.getReadModel();
     return readModel.threads.find((entry) => entry.id === threadId);
+  });
+
+  /**
+   * Resolve any stale pending approvals for a thread by emitting cancel activities.
+   * This handles the case where approval promises were lost (e.g., server restart)
+   * but the approval.requested activities are still in the event store.
+   */
+  const cancelStalePendingApprovals = Effect.fnUntraced(function* (
+    thread: OrchestrationThread,
+    createdAt: string,
+  ) {
+    const resolvedRequestIds = new Set<string>();
+    for (const activity of thread.activities) {
+      const payload =
+        activity.payload && typeof activity.payload === "object"
+          ? (activity.payload as Record<string, unknown>)
+          : null;
+      const requestId = payload && typeof payload.requestId === "string" ? payload.requestId : null;
+      if (!requestId) continue;
+
+      if (activity.kind === "approval.requested") {
+        // Will be checked below
+      } else if (
+        activity.kind === "approval.resolved" ||
+        activity.kind === "provider.approval.respond.failed"
+      ) {
+        resolvedRequestIds.add(requestId);
+      }
+    }
+
+    for (const activity of thread.activities) {
+      if (activity.kind !== "approval.requested") continue;
+      const payload =
+        activity.payload && typeof activity.payload === "object"
+          ? (activity.payload as Record<string, unknown>)
+          : null;
+      const requestId = payload && typeof payload.requestId === "string" ? payload.requestId : null;
+      if (!requestId || resolvedRequestIds.has(requestId)) continue;
+
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: serverCommandId("stale-approval-cancel"),
+        threadId: thread.id,
+        activity: {
+          id: EventId.makeUnsafe(crypto.randomUUID()),
+          tone: "approval",
+          kind: "approval.resolved",
+          summary: "Stale approval cancelled",
+          payload: {
+            requestId,
+            decision: "cancel",
+          },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      });
+    }
   });
 
   const ensureSessionForThread = Effect.fnUntraced(function* (
@@ -530,6 +589,9 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
+
+    // Cancel any stale pending approvals from previous turns/sessions
+    yield* cancelStalePendingApprovals(thread, event.payload.createdAt);
 
     const message = thread.messages.find((entry) => entry.id === event.payload.messageId);
     if (!message || message.role !== "user") {

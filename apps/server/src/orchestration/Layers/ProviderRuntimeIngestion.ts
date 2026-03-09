@@ -681,6 +681,8 @@ const make = Effect.gen(function* () {
     commandTag: string;
     finalDeltaCommandTag: string;
     fallbackText?: string;
+    /** Whether deltas were previously dispatched for this message (via streaming or buffer spill). */
+    hadPriorDeltas?: boolean;
   }) =>
     Effect.gen(function* () {
       const bufferedText = yield* takeBufferedAssistantText(input.messageId);
@@ -690,6 +692,13 @@ const make = Effect.gen(function* () {
           : (input.fallbackText?.trim().length ?? 0) > 0
             ? input.fallbackText!
             : "";
+
+      // Skip finalization entirely when no content was ever delivered for this message.
+      // This prevents empty "(empty response)" entries in the UI for tool-only segments.
+      if (text.length === 0 && !input.hadPriorDeltas) {
+        yield* clearAssistantMessageState(input.messageId);
+        return;
+      }
 
       if (text.length > 0) {
         yield* orchestrationEngine.dispatch({
@@ -995,6 +1004,11 @@ const make = Effect.gen(function* () {
         );
         const shouldApplyFallbackCompletionText =
           !existingAssistantMessage || existingAssistantMessage.text.length === 0;
+        // Check if deltas were previously dispatched for this message (it was remembered
+        // during content.delta processing). Messages only in the remembered set had content.
+        const hadPriorDeltas = turnId
+          ? (yield* getAssistantMessageIdsForTurn(thread.id, turnId)).has(assistantMessageId)
+          : false;
         if (turnId) {
           yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
         }
@@ -1010,6 +1024,7 @@ const make = Effect.gen(function* () {
           ...(assistantCompletion.fallbackText !== undefined && shouldApplyFallbackCompletionText
             ? { fallbackText: assistantCompletion.fallbackText }
             : {}),
+          hadPriorDeltas,
         });
 
         if (turnId) {
@@ -1044,6 +1059,9 @@ const make = Effect.gen(function* () {
                 createdAt: now,
                 commandTag: "assistant-complete-finalize",
                 finalDeltaCommandTag: "assistant-delta-finalize-fallback",
+                // Messages in the remembered set were added during content.delta processing,
+                // so they always had prior deltas dispatched.
+                hadPriorDeltas: true,
               }),
             { concurrency: 1 },
           ).pipe(Effect.asVoid);
