@@ -166,8 +166,30 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       registry.getByProvider(provider),
     );
 
+    /**
+     * Eagerly persist the resume cursor to the session directory when key
+     * lifecycle events arrive.  This closes the gap between session init
+     * (where the SDK assigns a session_id) and the first completed turn
+     * (where sendTurn already persists).  Without this, a server crash
+     * after session init but before the first turn would lose the cursor.
+     */
+    const eagerlyPersistResumeCursor = (event: ProviderRuntimeEvent) =>
+      Effect.gen(function* () {
+        const adapter = yield* registry.getByProvider(event.provider);
+        const sessions = yield* adapter.listSessions();
+        const session = sessions.find((s) => s.threadId === event.threadId);
+        if (session?.resumeCursor !== undefined) {
+          yield* upsertSessionBinding(session, event.threadId);
+        }
+      }).pipe(Effect.catch(() => Effect.void));
+
     const processRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
-      publishRuntimeEvent(event);
+      Effect.gen(function* () {
+        yield* publishRuntimeEvent(event);
+        if (event.type === "session.started" || event.type === "turn.completed") {
+          yield* eagerlyPersistResumeCursor(event);
+        }
+      });
 
     const worker = Effect.forever(
       Queue.take(runtimeEventQueue).pipe(Effect.flatMap(processRuntimeEvent)),
@@ -215,17 +237,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           }
         }
 
-        if (!hasResumeCursor) {
-          return yield* toValidationError(
-            input.operation,
-            `Cannot recover thread '${input.binding.threadId}' because no provider resume state is persisted.`,
-          );
-        }
-
         const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
         const persistedProviderOptions = readPersistedProviderOptions(input.binding.runtimePayload);
+        const strategy = hasResumeCursor ? "resume-thread" : "fresh-start";
 
-        const resumed = yield* adapter.startSession({
+        const recovered = yield* adapter.startSession({
           threadId: input.binding.threadId,
           provider: input.binding.provider,
           ...(persistedCwd ? { cwd: persistedCwd } : {}),
@@ -233,20 +249,20 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
           runtimeMode: input.binding.runtimeMode ?? "full-access",
         });
-        if (resumed.provider !== adapter.provider) {
+        if (recovered.provider !== adapter.provider) {
           return yield* toValidationError(
             input.operation,
-            `Adapter/provider mismatch while recovering thread '${input.binding.threadId}'. Expected '${adapter.provider}', received '${resumed.provider}'.`,
+            `Adapter/provider mismatch while recovering thread '${input.binding.threadId}'. Expected '${adapter.provider}', received '${recovered.provider}'.`,
           );
         }
 
-        yield* upsertSessionBinding(resumed, input.binding.threadId);
+        yield* upsertSessionBinding(recovered, input.binding.threadId);
         yield* analytics.record("provider.session.recovered", {
-          provider: resumed.provider,
-          strategy: "resume-thread",
-          hasResumeCursor: resumed.resumeCursor !== undefined,
+          provider: recovered.provider,
+          strategy,
+          hasResumeCursor: recovered.resumeCursor !== undefined,
         });
-        return { adapter, session: resumed } as const;
+        return { adapter, session: recovered } as const;
       });
 
     const resolveRoutableSession = (input: {
