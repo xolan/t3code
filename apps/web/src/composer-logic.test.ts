@@ -56,6 +56,63 @@ describe("detectComposerTrigger", () => {
       rangeEnd: text.length,
     });
   });
+
+  it("detects custom slash commands like /speckit.specify", () => {
+    const text = "/speckit.specify";
+    const trigger = detectComposerTrigger(text, text.length);
+
+    expect(trigger).toEqual({
+      kind: "slash-command",
+      query: "speckit.specify",
+      rangeStart: 0,
+      rangeEnd: text.length,
+    });
+  });
+
+  it("detects partial custom slash command while typing", () => {
+    const text = "/speckit";
+    const trigger = detectComposerTrigger(text, text.length);
+
+    expect(trigger).toEqual({
+      kind: "slash-command",
+      query: "speckit",
+      rangeStart: 0,
+      rangeEnd: text.length,
+    });
+  });
+
+  it("detects bare slash as slash-command trigger", () => {
+    const text = "/";
+    const trigger = detectComposerTrigger(text, text.length);
+
+    expect(trigger).toEqual({
+      kind: "slash-command",
+      query: "",
+      rangeStart: 0,
+      rangeEnd: text.length,
+    });
+  });
+
+  it("detects arbitrary unknown command names as slash-command trigger", () => {
+    const text = "/anything";
+    const trigger = detectComposerTrigger(text, text.length);
+
+    expect(trigger).toEqual({
+      kind: "slash-command",
+      query: "anything",
+      rangeStart: 0,
+      rangeEnd: text.length,
+    });
+  });
+
+  it("returns null for slash command with trailing space (not a partial)", () => {
+    const text = "/speckit.plan some args";
+    const trigger = detectComposerTrigger(text, text.length);
+
+    // The regex /^\/(\S*)$/ requires the slash token to be the only thing on the line
+    // with no spaces, so a command followed by args returns null for slash-command trigger
+    expect(trigger).toBeNull();
+  });
 });
 
 describe("replaceTextRange", () => {

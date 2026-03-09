@@ -59,6 +59,7 @@ import { CheckpointDiffQuery } from "./checkpointing/Services/CheckpointDiffQuer
 import { clamp } from "effect/Number";
 import { Open, resolveAvailableEditors } from "./open";
 import { ServerConfig } from "./config";
+import { listSlashCommands } from "./slashCommands";
 import { GitCore } from "./git/Services/GitCore.ts";
 import { tryHandleProjectFaviconRequest } from "./projectFaviconRoute";
 import {
@@ -916,6 +917,9 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         const keybindingsConfig = yield* keybindingsManager.upsertKeybindingRule(body);
         return { keybindings: keybindingsConfig, issues: [] };
       }
+
+      case WS_METHODS.serverListSlashCommands:
+        return yield* listSlashCommands(cwd);
 
       default: {
         const _exhaustiveCheck: never = request.body;

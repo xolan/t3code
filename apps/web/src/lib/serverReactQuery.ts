@@ -4,6 +4,7 @@ import { ensureNativeApi } from "~/nativeApi";
 export const serverQueryKeys = {
   all: ["server"] as const,
   config: () => ["server", "config"] as const,
+  slashCommands: () => ["server", "slashCommands"] as const,
 };
 
 export function serverConfigQueryOptions() {
@@ -12,6 +13,17 @@ export function serverConfigQueryOptions() {
     queryFn: async () => {
       const api = ensureNativeApi();
       return api.server.getConfig();
+    },
+    staleTime: Infinity,
+  });
+}
+
+export function slashCommandsQueryOptions() {
+  return queryOptions({
+    queryKey: serverQueryKeys.slashCommands(),
+    queryFn: async () => {
+      const api = ensureNativeApi();
+      return api.server.listSlashCommands();
     },
     staleTime: Infinity,
   });

@@ -10,7 +10,7 @@ export interface ComposerTrigger {
   rangeEnd: number;
 }
 
-const SLASH_COMMANDS: readonly ComposerSlashCommand[] = ["model", "plan", "default"];
+const _SLASH_COMMANDS: readonly ComposerSlashCommand[] = ["model", "plan", "default"];
 
 function clampCursor(text: string, cursor: number): number {
   if (!Number.isFinite(cursor)) return text.length;
@@ -126,15 +126,15 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
           rangeEnd: cursor,
         };
       }
-      if (SLASH_COMMANDS.some((command) => command.startsWith(commandQuery.toLowerCase()))) {
-        return {
-          kind: "slash-command",
-          query: commandQuery,
-          rangeStart: lineStart,
-          rangeEnd: cursor,
-        };
-      }
-      return null;
+      // Always open the slash-command menu for any `/word` prefix — the
+      // autocomplete list includes both built-in and custom (spec-kit) commands,
+      // so filtering happens downstream rather than gating on a static list.
+      return {
+        kind: "slash-command",
+        query: commandQuery,
+        rangeStart: lineStart,
+        rangeEnd: cursor,
+      };
     }
 
     const modelMatch = /^\/model(?:\s+(.*))?$/.exec(linePrefix);

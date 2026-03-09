@@ -55,6 +55,30 @@ export const ServerConfig = Schema.Struct({
 });
 export type ServerConfig = typeof ServerConfig.Type;
 
+// ── Slash Command Definitions (spec-kit / .claude/commands) ─────────
+
+export const SlashCommandHandoff = Schema.Struct({
+  label: TrimmedNonEmptyString,
+  agent: TrimmedNonEmptyString,
+  prompt: TrimmedNonEmptyString,
+  send: Schema.optional(Schema.Boolean),
+});
+export type SlashCommandHandoff = typeof SlashCommandHandoff.Type;
+
+export const SlashCommandDefinition = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+  description: TrimmedNonEmptyString,
+  body: Schema.String,
+  handoffs: Schema.Array(SlashCommandHandoff),
+});
+export type SlashCommandDefinition = typeof SlashCommandDefinition.Type;
+
+export const ListSlashCommandsResult = Schema.Array(SlashCommandDefinition);
+export type ListSlashCommandsResult = typeof ListSlashCommandsResult.Type;
+
+// ── Keybinding mutations ────────────────────────────────────────────
+
 export const ServerUpsertKeybindingInput = KeybindingRule;
 export type ServerUpsertKeybindingInput = typeof ServerUpsertKeybindingInput.Type;
 

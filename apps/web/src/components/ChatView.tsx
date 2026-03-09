@@ -50,7 +50,11 @@ import {
 } from "@tanstack/react-virtual";
 import { gitBranchesQueryOptions, gitCreateWorktreeMutationOptions } from "~/lib/gitReactQuery";
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
-import { serverConfigQueryOptions, serverQueryKeys } from "~/lib/serverReactQuery";
+import {
+  serverConfigQueryOptions,
+  serverQueryKeys,
+  slashCommandsQueryOptions,
+} from "~/lib/serverReactQuery";
 
 import { isElectron } from "../env";
 import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
@@ -148,6 +152,8 @@ import {
   XIcon,
   CopyIcon,
   CheckIcon,
+  ZapIcon,
+  ScrollTextIcon,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -405,6 +411,14 @@ type ComposerCommandItem =
       model: ModelSlug;
       label: string;
       description: string;
+    }
+  | {
+      id: string;
+      type: "custom-command";
+      commandId: string;
+      label: string;
+      description: string;
+      body: string;
     };
 
 type SendPhase = "idle" | "preparing-worktree" | "sending-turn";
@@ -513,6 +527,9 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
       ) : null}
       {props.item.type === "slash-command" ? (
         <BotIcon className="size-4 text-muted-foreground/80" />
+      ) : null}
+      {props.item.type === "custom-command" ? (
+        <ScrollTextIcon className="size-4 text-muted-foreground/80" />
       ) : null}
       {props.item.type === "model" ? (
         <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
@@ -1276,6 +1293,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const effectivePathQuery = pathTriggerQuery.length > 0 ? debouncedPathQuery : "";
   const branchesQuery = useQuery(gitBranchesQueryOptions(gitCwd));
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
+  const slashCommandsQuery = useQuery(slashCommandsQueryOptions());
   const workspaceEntriesQuery = useQuery(
     projectSearchEntriesQueryOptions({
       cwd: gitCwd,
@@ -1322,13 +1340,30 @@ export default function ChatView({ threadId }: ChatViewProps) {
           description: "Switch this thread back to normal chat mode",
         },
       ] satisfies ReadonlyArray<Extract<ComposerCommandItem, { type: "slash-command" }>>;
+      const customCommandItems: Extract<ComposerCommandItem, { type: "custom-command" }>[] = (
+        slashCommandsQuery.data ?? []
+      ).map((cmd) => ({
+        id: `custom:${cmd.id}`,
+        type: "custom-command",
+        commandId: cmd.id,
+        label: cmd.name,
+        description: cmd.description,
+        body: cmd.body,
+      }));
+      const allItems: ComposerCommandItem[] = [...slashCommandItems, ...customCommandItems];
       const query = composerTrigger.query.trim().toLowerCase();
       if (!query) {
-        return [...slashCommandItems];
+        return allItems;
       }
-      return slashCommandItems.filter(
-        (item) => item.command.includes(query) || item.label.slice(1).includes(query),
-      );
+      return allItems.filter((item) => {
+        if (item.type === "slash-command") {
+          return item.command.includes(query) || item.label.slice(1).includes(query);
+        }
+        if (item.type === "custom-command") {
+          return item.commandId.includes(query) || item.label.slice(1).includes(query);
+        }
+        return false;
+      });
     }
 
     return searchableModelOptions
@@ -1347,7 +1382,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
         label: name,
         description: `${providerLabel} · ${slug}`,
       }));
-  }, [composerTrigger, searchableModelOptions, workspaceEntries]);
+  }, [composerTrigger, searchableModelOptions, slashCommandsQuery.data, workspaceEntries]);
   const composerMenuOpen = Boolean(composerTrigger);
   const activeComposerMenuItem = useMemo(
     () =>
@@ -3382,6 +3417,20 @@ export default function ChatView({ threadId }: ChatViewProps) {
         void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
         const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
           expectedText: expectedToken,
+        });
+        if (applied) {
+          setComposerHighlightedItemId(null);
+        }
+        return;
+      }
+      if (item.type === "custom-command") {
+        // Replace the slash trigger with the command body, substituting
+        // any text typed after the command name as $ARGUMENTS.
+        const userArgs = snapshot.value.slice(trigger.rangeEnd).trim();
+        const expandedBody = item.body.replace(/\$ARGUMENTS/g, userArgs);
+        // Replace the entire composer text with the expanded command body
+        const applied = applyPromptReplacement(0, snapshot.value.length, expandedBody, {
+          expectedText: snapshot.value,
         });
         if (applied) {
           setComposerHighlightedItemId(null);
@@ -5506,7 +5555,9 @@ const MessagesTimeline = memo(function MessagesTimeline({
       {row.kind === "message" &&
         row.message.role === "assistant" &&
         (() => {
-          const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+          // Skip rendering empty non-streaming assistant messages (tool-only segments)
+          if (!row.message.text && !row.message.streaming) return null;
+          const messageText = row.message.text || "";
           return (
             <>
               {row.showCompletionDivider && (
