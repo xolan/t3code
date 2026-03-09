@@ -1028,6 +1028,78 @@ describe("WebSocket Server", () => {
     );
   });
 
+  it("responds to server.listSlashCommands with parsed command files", async () => {
+    const stateDir = makeTempDir("t3code-state-slash-cmds-");
+    const keybindingsPath = path.join(stateDir, "keybindings.json");
+    fs.writeFileSync(keybindingsPath, "[]", "utf8");
+
+    // Create a temp workspace with .claude/commands/ containing a test command
+    const workspaceDir = makeTempDir("t3code-workspace-slash-cmds-");
+    const commandsDir = path.join(workspaceDir, ".claude", "commands");
+    fs.mkdirSync(commandsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(commandsDir, "test.cmd.md"),
+      [
+        "---",
+        "description: A test command",
+        "handoffs:",
+        "  - label: Follow Up",
+        "    agent: test.followup",
+        "    prompt: Do follow up",
+        "    send: true",
+        "---",
+        "",
+        "Hello $ARGUMENTS",
+      ].join("\n"),
+      "utf8",
+    );
+
+    server = await createTestServer({ cwd: workspaceDir, stateDir });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const ws = await connectWs(port);
+    connections.push(ws);
+    await waitForMessage(ws);
+
+    const response = await sendRequest(ws, WS_METHODS.serverListSlashCommands);
+    expect(response.error).toBeUndefined();
+    expect(response.result).toEqual([
+      {
+        id: "test.cmd",
+        name: "/test.cmd",
+        description: "A test command",
+        body: "Hello $ARGUMENTS",
+        handoffs: [
+          {
+            label: "Follow Up",
+            agent: "test.followup",
+            prompt: "Do follow up",
+            send: true,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("responds to server.listSlashCommands with empty array when no commands exist", async () => {
+    const stateDir = makeTempDir("t3code-state-slash-cmds-empty-");
+    const keybindingsPath = path.join(stateDir, "keybindings.json");
+    fs.writeFileSync(keybindingsPath, "[]", "utf8");
+
+    server = await createTestServer({ cwd: "/nonexistent/workspace", stateDir });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const ws = await connectWs(port);
+    connections.push(ws);
+    await waitForMessage(ws);
+
+    const response = await sendRequest(ws, WS_METHODS.serverListSlashCommands);
+    expect(response.error).toBeUndefined();
+    expect(response.result).toEqual([]);
+  });
+
   it("returns error for unknown methods", async () => {
     server = await createTestServer({ cwd: "/test" });
     const addr = server.address();
@@ -1754,6 +1826,51 @@ describe("WebSocket Server", () => {
       cwd: "/test",
       action: "commit_push",
     });
+  });
+
+  it("responds to server.listSlashCommands with commands from .claude/commands", async () => {
+    const cwdDir = makeTempDir("t3code-slash-cmd-");
+    const commandsDir = path.join(cwdDir, ".claude", "commands");
+    fs.mkdirSync(commandsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(commandsDir, "test.cmd.md"),
+      "---\ndescription: A test command\n---\n\nTest body with $ARGUMENTS.",
+      "utf8",
+    );
+
+    server = await createTestServer({ cwd: cwdDir });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const ws = await connectWs(port);
+    connections.push(ws);
+    await waitForMessage(ws);
+
+    const response = await sendRequest(ws, WS_METHODS.serverListSlashCommands);
+    expect(response.error).toBeUndefined();
+    expect(response.result).toEqual([
+      {
+        id: "test.cmd",
+        name: "/test.cmd",
+        description: "A test command",
+        body: "Test body with $ARGUMENTS.",
+        handoffs: [],
+      },
+    ]);
+  });
+
+  it("responds to server.listSlashCommands with empty array when no commands directory", async () => {
+    const cwdDir = makeTempDir("t3code-slash-cmd-empty-");
+
+    server = await createTestServer({ cwd: cwdDir });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const ws = await connectWs(port);
+    connections.push(ws);
+    await waitForMessage(ws);
+
+    const response = await sendRequest(ws, WS_METHODS.serverListSlashCommands);
+    expect(response.error).toBeUndefined();
+    expect(response.result).toEqual([]);
   });
 
   it("rejects websocket connections without a valid auth token", async () => {

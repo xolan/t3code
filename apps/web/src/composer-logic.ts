@@ -174,6 +174,36 @@ export function parseStandaloneComposerSlashCommand(
   return "default";
 }
 
+/**
+ * Parse a submitted message that starts with a custom slash command.
+ * Returns the command id and user arguments, or `null` if the text
+ * doesn't start with a `/word` that matches any of the given command ids.
+ *
+ * Example: `parseCustomSlashCommandInput("/speckit.specify build auth", ["speckit.specify", "speckit.plan"])`
+ * → `{ commandId: "speckit.specify", args: "build auth" }`
+ */
+export function parseCustomSlashCommandInput(
+  text: string,
+  commandIds: readonly string[],
+): { commandId: string; args: string } | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("/")) return null;
+
+  // Try to match the longest command id first to avoid partial matches
+  // (e.g. `/speckit` shouldn't match if `/speckit.specify` exists and was typed)
+  const sorted = commandIds.toSorted((a, b) => b.length - a.length);
+  for (const id of sorted) {
+    const prefix = `/${id}`;
+    if (trimmed === prefix || trimmed.startsWith(`${prefix} `) || trimmed.startsWith(`${prefix}\n`)) {
+      return {
+        commandId: id,
+        args: trimmed.slice(prefix.length).trim(),
+      };
+    }
+  }
+  return null;
+}
+
 export function replaceTextRange(
   text: string,
   rangeStart: number,

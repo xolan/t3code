@@ -4,6 +4,7 @@ import {
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   isCollapsedCursorAdjacentToMention,
+  parseCustomSlashCommandInput,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
 } from "./composer-logic";
@@ -193,5 +194,61 @@ describe("parseStandaloneComposerSlashCommand", () => {
 
   it("ignores slash commands with extra message text", () => {
     expect(parseStandaloneComposerSlashCommand("/plan explain this")).toBeNull();
+  });
+});
+
+describe("parseCustomSlashCommandInput", () => {
+  const commandIds = ["speckit.specify", "speckit.plan", "speckit.tasks", "lint"];
+
+  it("parses command with arguments", () => {
+    expect(parseCustomSlashCommandInput("/speckit.specify build user auth", commandIds)).toEqual({
+      commandId: "speckit.specify",
+      args: "build user auth",
+    });
+  });
+
+  it("parses command without arguments", () => {
+    expect(parseCustomSlashCommandInput("/speckit.plan", commandIds)).toEqual({
+      commandId: "speckit.plan",
+      args: "",
+    });
+  });
+
+  it("parses command with leading/trailing whitespace", () => {
+    expect(parseCustomSlashCommandInput("  /lint  ", commandIds)).toEqual({
+      commandId: "lint",
+      args: "",
+    });
+  });
+
+  it("parses command with newline-separated arguments", () => {
+    expect(parseCustomSlashCommandInput("/speckit.specify\nbuild auth", commandIds)).toEqual({
+      commandId: "speckit.specify",
+      args: "build auth",
+    });
+  });
+
+  it("returns null for unrecognized commands", () => {
+    expect(parseCustomSlashCommandInput("/unknown some args", commandIds)).toBeNull();
+  });
+
+  it("returns null for non-slash text", () => {
+    expect(parseCustomSlashCommandInput("just normal text", commandIds)).toBeNull();
+  });
+
+  it("returns null for empty command list", () => {
+    expect(parseCustomSlashCommandInput("/speckit.plan", [])).toBeNull();
+  });
+
+  it("matches longest command id to avoid partial conflicts", () => {
+    const ids = ["spec", "speckit.specify"];
+    expect(parseCustomSlashCommandInput("/speckit.specify args", ids)).toEqual({
+      commandId: "speckit.specify",
+      args: "args",
+    });
+    expect(parseCustomSlashCommandInput("/spec args", ids)).toEqual({
+      commandId: "spec",
+      args: "args",
+    });
   });
 });

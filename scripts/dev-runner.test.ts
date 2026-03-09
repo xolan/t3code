@@ -46,6 +46,27 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
   });
 
   describe("createDevRunnerEnv", () => {
+    it.effect("sets T3CODE_CWD to current process.cwd()", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "dev",
+          baseEnv: {},
+          serverOffset: 0,
+          webOffset: 0,
+          stateDir: undefined,
+          authToken: undefined,
+          noBrowser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+        });
+
+        assert.equal(env.T3CODE_CWD, process.cwd());
+      }),
+    );
+
     it.effect("defaults state dir to ~/.t3/dev when not provided", () =>
       Effect.gen(function* () {
         const [env, defaultStateDir] = yield* Effect.all([
