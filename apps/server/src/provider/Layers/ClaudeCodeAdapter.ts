@@ -59,6 +59,44 @@ import type {
 
 const PROVIDER = "claudeCode" as const;
 
+// ── Plan mode instructions ────────────────────────────────────────────
+
+const CLAUDE_CODE_PLAN_MODE_SYSTEM_INSTRUCTION = `You are in Plan Mode. In this mode you must ONLY plan, never execute/implement.
+
+Rules:
+- Explore the codebase (read files, search, inspect) to ground your plan in reality.
+- Ask clarifying questions when ambiguity cannot be resolved by exploration.
+- Do NOT write, edit, or create files. Do NOT run mutating commands.
+- When your plan is ready, wrap it in a <proposed_plan> block (opening and closing tags each on their own line, Markdown inside).
+
+Example:
+
+<proposed_plan>
+# Plan Title
+
+## Summary
+Brief description of what will be done.
+
+## Steps
+1. First step
+2. Second step
+
+## Test Plan
+- How to verify the changes work
+</proposed_plan>
+
+Only produce one <proposed_plan> block per turn, and only when presenting a complete plan.`;
+
+const CLAUDE_CODE_DEFAULT_MODE_SYSTEM_INSTRUCTION = `You are in Default (implementation) mode. Execute the user's request directly. Make reasonable assumptions rather than asking questions. If a previous plan exists, follow it.`;
+
+const PROPOSED_PLAN_BLOCK_REGEX = /<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/i;
+
+function extractProposedPlanMarkdown(text: string | undefined): string | undefined {
+  const match = text ? PROPOSED_PLAN_BLOCK_REGEX.exec(text) : null;
+  const planMarkdown = match?.[1]?.trim();
+  return planMarkdown && planMarkdown.length > 0 ? planMarkdown : undefined;
+}
+
 export interface ClaudeCodeAdapterLiveOptions {
   readonly nativeEventLogger?: EventNdjsonLogger;
 }
@@ -133,6 +171,10 @@ interface ClaudeSessionContext {
   streamedToolIds: Set<string>;
   /** Monotonic counter for distinct assistant message segments within a turn. */
   assistantSegmentIndex: number;
+  /** Current interaction mode for plan detection. */
+  interactionMode: "default" | "plan";
+  /** Accumulated assistant text for the current turn (for proposed plan extraction). */
+  turnAssistantText: string;
 }
 
 // ── SDK Message → ProviderRuntimeEvent mapping ────────────────────────
@@ -371,7 +413,8 @@ function mapSystemMessage(
 }
 
 function assistantSegmentItemId(ctx: ClaudeSessionContext): RuntimeItemId {
-  return RuntimeItemId.makeUnsafe(`assistant-segment-${ctx.assistantSegmentIndex}`);
+  const turnPart = ctx.currentTurnId ?? "anon";
+  return RuntimeItemId.makeUnsafe(`${turnPart}:segment-${ctx.assistantSegmentIndex}`);
 }
 
 function mapAssistantMessage(
@@ -393,8 +436,13 @@ function mapAssistantMessage(
 
   for (const block of betaMessage.content) {
     if (block.type === "text") {
+      // Accumulate assistant text for proposed plan detection
+      if (block.text && block.text.length > 0) {
+        ctx.turnAssistantText += block.text;
+      }
       // Skip text blocks that were already delivered via stream_event deltas
-      if (!ctx.hasStreamedContent) {
+      // Also skip empty text blocks that carry no content
+      if (!ctx.hasStreamedContent && block.text && block.text.length > 0) {
         hasTextContent = true;
         events.push({
           ...base,
@@ -406,7 +454,8 @@ function mapAssistantMessage(
       }
     } else if (block.type === "thinking") {
       // Skip thinking blocks that were already delivered via stream_event deltas
-      if (!ctx.hasStreamedContent) {
+      const thinkingText = (block as { thinking: string }).thinking;
+      if (!ctx.hasStreamedContent && thinkingText && thinkingText.length > 0) {
         hasTextContent = true;
         events.push({
           ...base,
@@ -415,7 +464,7 @@ function mapAssistantMessage(
           type: "content.delta" as const,
           payload: {
             streamKind: "reasoning_text" as const,
-            delta: (block as { thinking: string }).thinking,
+            delta: thinkingText,
           },
         } as ProviderRuntimeEvent);
       }
@@ -473,6 +522,8 @@ function mapStreamEvent(
       const delta = event.delta as { type: string; text?: string; thinking?: string };
       if (delta.type === "text_delta" && delta.text) {
         ctx.hasStreamedContent = true;
+        // Accumulate assistant text for proposed plan detection
+        ctx.turnAssistantText += delta.text;
         return [
           {
             ...base,
@@ -529,22 +580,35 @@ function mapResultMessage(
   const state = isError ? ("failed" as const) : ("completed" as const);
   ctx.status = "ready";
 
-  return [
-    {
+  const events: ProviderRuntimeEvent[] = [];
+
+  // Extract proposed plan from accumulated assistant text
+  const proposedPlanMarkdown = extractProposedPlanMarkdown(ctx.turnAssistantText);
+  if (proposedPlanMarkdown) {
+    events.push({
       ...base,
-      type: "turn.completed" as const,
-      payload: {
-        state,
-        stopReason: msg.stop_reason ?? null,
-        usage: msg.usage,
-        modelUsage: msg.modelUsage,
-        totalCostUsd: msg.total_cost_usd,
-        ...(isError && "errors" in msg && (msg as { errors?: string[] }).errors?.length
-          ? { errorMessage: (msg as { errors: string[] }).errors.join("; ") }
-          : {}),
-      },
-    } as ProviderRuntimeEvent,
-  ];
+      eventId: makeEventId(),
+      type: "turn.proposed.completed" as const,
+      payload: { planMarkdown: proposedPlanMarkdown },
+    } as ProviderRuntimeEvent);
+  }
+
+  events.push({
+    ...base,
+    type: "turn.completed" as const,
+    payload: {
+      state,
+      stopReason: msg.stop_reason ?? null,
+      usage: msg.usage,
+      modelUsage: msg.modelUsage,
+      totalCostUsd: msg.total_cost_usd,
+      ...(isError && "errors" in msg && (msg as { errors?: string[] }).errors?.length
+        ? { errorMessage: (msg as { errors: string[] }).errors.join("; ") }
+        : {}),
+    },
+  } as ProviderRuntimeEvent);
+
+  return events;
 }
 
 function mapToolNameToItemType(
@@ -574,9 +638,18 @@ function mapToolNameToRequestType(
 }
 
 function formatToolApprovalDetail(toolName: string, input: Record<string, unknown>): string {
-  const command = input.command ?? input.file_path ?? input.path ?? input.pattern;
+  const command = input.command ?? input.file_path ?? input.path ?? input.pattern ?? input.query;
   if (typeof command === "string") return `${toolName}: ${command}`;
   return toolName;
+}
+
+/** Tools that are safe to auto-approve without user interaction. */
+function shouldAutoApprove(toolName: string): boolean {
+  const lower = toolName.toLowerCase();
+  // AskUserQuestion generates question text in the assistant response — auto-approve
+  // so the user sees the question immediately instead of an opaque approval dialog.
+  // ToolSearch is a discovery tool with no side effects.
+  return lower === "askuserquestion" || lower === "toolsearch";
 }
 
 // ── Adapter construction ──────────────────────────────────────────────
@@ -732,6 +805,11 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
             const requestId = opts.toolUseID;
             const requestType = mapToolNameToRequestType(toolName);
 
+            // Auto-approve safe/informational tools without user interaction
+            if (shouldAutoApprove(toolName)) {
+              return { behavior: "allow" as const };
+            }
+
             emitEvents([
               {
                 eventId: makeEventId(),
@@ -817,6 +895,8 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
           hasStreamedContent: false,
           streamedToolIds: new Set(),
           assistantSegmentIndex: 0,
+          interactionMode: "default",
+          turnAssistantText: "",
         };
         sessions.set(threadId, ctx);
 
@@ -918,7 +998,13 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
         ctx.hasStreamedContent = false;
         ctx.streamedToolIds.clear();
         ctx.assistantSegmentIndex = 0;
+        ctx.turnAssistantText = "";
         ctx.updatedAt = nowIso();
+
+        // Track interaction mode for proposed plan detection
+        if (input.interactionMode) {
+          ctx.interactionMode = input.interactionMode;
+        }
 
         if (input.model && input.model !== ctx.model) {
           yield* Effect.tryPromise({
@@ -940,11 +1026,19 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
           } as ProviderRuntimeEvent,
         ]);
 
+        // Prepend interaction mode instructions to the user message
+        const modeInstruction =
+          ctx.interactionMode === "plan"
+            ? CLAUDE_CODE_PLAN_MODE_SYSTEM_INSTRUCTION
+            : CLAUDE_CODE_DEFAULT_MODE_SYSTEM_INSTRUCTION;
+        const userText = input.input ?? "";
+        const promptContent = `[SYSTEM INSTRUCTION — do not repeat this to the user]\n${modeInstruction}\n[END SYSTEM INSTRUCTION]\n\n${userText}`;
+
         yield* Effect.try({
           try: () =>
             ctx.pushPrompt({
               type: "user",
-              message: { role: "user", content: input.input ?? "" },
+              message: { role: "user", content: promptContent },
               parent_tool_use_id: null,
               session_id: ctx.sessionId ?? "",
             }),
