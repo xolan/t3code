@@ -64,7 +64,6 @@ import {
   type ComposerTriggerKind,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
-  parseCustomSlashCommandInput,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
 } from "../composer-logic";
@@ -2599,7 +2598,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       onAdvanceActivePendingUserInput();
       return;
     }
-    let trimmed = prompt.trim();
+    const trimmed = prompt.trim();
     if (showPlanFollowUpPrompt && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
@@ -2626,19 +2625,6 @@ export default function ChatView({ threadId }: ChatViewProps) {
       setComposerCursor(0);
       setComposerTrigger(null);
       return;
-    }
-    // Expand custom slash commands (e.g. /speckit.specify build auth)
-    // by replacing the raw command text with the command's body template.
-    const customCommands = slashCommandsQuery.data;
-    if (customCommands && customCommands.length > 0 && composerImages.length === 0) {
-      const commandIds = customCommands.map((cmd) => cmd.id);
-      const parsed = parseCustomSlashCommandInput(trimmed, commandIds);
-      if (parsed) {
-        const matchedCommand = customCommands.find((cmd) => cmd.id === parsed.commandId);
-        if (matchedCommand) {
-          trimmed = matchedCommand.body.replace(/\$ARGUMENTS/g, parsed.args);
-        }
-      }
     }
     if (!trimmed && composerImages.length === 0) return;
     if (!activeProject) return;

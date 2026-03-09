@@ -167,9 +167,12 @@ it.layer(NodeServices.layer)("listSlashCommands", (it) => {
       const commandsDir = path.resolve(dir, ".claude/commands");
       yield* fs.makeDirectory(commandsDir, { recursive: true });
 
-      yield* fs.writeFileString(path.resolve(commandsDir, "zebra.md"), "---\ndescription: zebra command\n---\n\nzebra body.");
-      yield* fs.writeFileString(path.resolve(commandsDir, "alpha.md"), "---\ndescription: alpha command\n---\n\nalpha body.");
-      yield* fs.writeFileString(path.resolve(commandsDir, "middle.md"), "---\ndescription: middle command\n---\n\nmiddle body.");
+      const mkCommand = (name: string) =>
+        `---\ndescription: ${name} command\n---\n\n${name} body.`;
+
+      yield* fs.writeFileString(path.resolve(commandsDir, "zebra.md"), mkCommand("zebra"));
+      yield* fs.writeFileString(path.resolve(commandsDir, "alpha.md"), mkCommand("alpha"));
+      yield* fs.writeFileString(path.resolve(commandsDir, "middle.md"), mkCommand("middle"));
 
       const result = yield* listSlashCommands(dir);
       assert.strictEqual(result.length, 3);
@@ -187,11 +190,11 @@ it.layer(NodeServices.layer)("listSlashCommands", (it) => {
       const result = yield* listSlashCommands(projectRoot);
 
       // We expect at least the known spec-kit commands to be present
-      const ids = new Set(result.map((cmd) => cmd.id));
-      assert(ids.has("speckit.specify"), "expected speckit.specify");
-      assert(ids.has("speckit.plan"), "expected speckit.plan");
-      assert(ids.has("speckit.implement"), "expected speckit.implement");
-      assert(ids.has("speckit.tasks"), "expected speckit.tasks");
+      const ids = result.map((cmd) => cmd.id);
+      assert(ids.includes("speckit.specify"), "expected speckit.specify");
+      assert(ids.includes("speckit.plan"), "expected speckit.plan");
+      assert(ids.includes("speckit.implement"), "expected speckit.implement");
+      assert(ids.includes("speckit.tasks"), "expected speckit.tasks");
 
       // Verify structure of a known command
       const specify = result.find((cmd) => cmd.id === "speckit.specify");

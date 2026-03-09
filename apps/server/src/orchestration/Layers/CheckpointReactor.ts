@@ -427,21 +427,16 @@ const make = Effect.gen(function* () {
     }
 
     const sessionRuntime = yield* resolveSessionRuntimeForThread(event.payload.threadId);
-    const revertCwd = Option.match(sessionRuntime, {
-      onSome: (runtime) => runtime.cwd,
-      onNone: () =>
-        resolveThreadWorkspaceCwd({ thread, projects: readModel.projects }) ?? undefined,
-    });
-    if (!revertCwd) {
+    if (Option.isNone(sessionRuntime)) {
       yield* appendRevertFailureActivity({
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
-        detail: "No active provider session or project workspace cwd is available for this thread.",
+        detail: "No active provider session with workspace cwd is bound to this thread.",
         createdAt: now,
       }).pipe(Effect.catch(() => Effect.void));
       return;
     }
-    if (!isGitWorkspace(revertCwd)) {
+    if (!isGitWorkspace(sessionRuntime.value.cwd)) {
       yield* appendRevertFailureActivity({
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
@@ -484,7 +479,7 @@ const make = Effect.gen(function* () {
     }
 
     const restored = yield* checkpointStore.restoreCheckpoint({
-      cwd: revertCwd,
+      cwd: sessionRuntime.value.cwd,
       checkpointRef: targetCheckpointRef,
       fallbackToHead: event.payload.turnCount === 0,
     });
@@ -500,10 +495,23 @@ const make = Effect.gen(function* () {
 
     const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
     if (rolledBackTurns > 0) {
-      yield* providerService.rollbackConversation({
-        threadId: event.payload.threadId,
-        numTurns: rolledBackTurns,
-      });
+      yield* providerService
+        .rollbackConversation({
+          threadId: sessionRuntime.value.threadId,
+          numTurns: rolledBackTurns,
+        })
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning(
+              "provider conversation rollback unavailable, filesystem checkpoint restored successfully",
+              {
+                threadId: event.payload.threadId,
+                turnCount: event.payload.turnCount,
+                detail: error.message,
+              },
+            ),
+          ),
+        );
     }
 
     const staleCheckpointRefs = thread.checkpoints
@@ -512,7 +520,7 @@ const make = Effect.gen(function* () {
 
     if (staleCheckpointRefs.length > 0) {
       yield* checkpointStore.deleteCheckpointRefs({
-        cwd: revertCwd,
+        cwd: sessionRuntime.value.cwd,
         checkpointRefs: staleCheckpointRefs,
       });
     }
