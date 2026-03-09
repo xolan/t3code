@@ -4,6 +4,7 @@ import {
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   isCollapsedCursorAdjacentToMention,
+  parseCustomSlashCommandInput,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
 } from "./composer-logic";
@@ -179,6 +180,57 @@ describe("isCollapsedCursorAdjacentToMention", () => {
     expect(isCollapsedCursorAdjacentToMention(text, mentionStart, "right")).toBe(true);
     expect(isCollapsedCursorAdjacentToMention(text, mentionEnd, "right")).toBe(false);
     expect(isCollapsedCursorAdjacentToMention(text, mentionStart - 1, "right")).toBe(false);
+  });
+});
+
+describe("parseCustomSlashCommandInput", () => {
+  const commandIds = ["speckit.specify", "speckit.plan", "speckit.tasks", "speckit.taskstoissues"];
+
+  it("matches exact command with no args", () => {
+    expect(parseCustomSlashCommandInput("/speckit.specify", commandIds)).toEqual({
+      commandId: "speckit.specify",
+      args: "",
+    });
+  });
+
+  it("matches command with args after space", () => {
+    expect(parseCustomSlashCommandInput("/speckit.specify build auth", commandIds)).toEqual({
+      commandId: "speckit.specify",
+      args: "build auth",
+    });
+  });
+
+  it("matches command with args after newline", () => {
+    expect(parseCustomSlashCommandInput("/speckit.plan\nsome details", commandIds)).toEqual({
+      commandId: "speckit.plan",
+      args: "some details",
+    });
+  });
+
+  it("returns null for unrecognized command", () => {
+    expect(parseCustomSlashCommandInput("/unknown", commandIds)).toBeNull();
+  });
+
+  it("returns null for non-command text", () => {
+    expect(parseCustomSlashCommandInput("just a message", commandIds)).toBeNull();
+  });
+
+  it("returns null for empty list", () => {
+    expect(parseCustomSlashCommandInput("/speckit.specify", [])).toBeNull();
+  });
+
+  it("prefers longest matching command (taskstoissues over tasks)", () => {
+    expect(parseCustomSlashCommandInput("/speckit.taskstoissues arg", commandIds)).toEqual({
+      commandId: "speckit.taskstoissues",
+      args: "arg",
+    });
+  });
+
+  it("trims leading/trailing whitespace from input", () => {
+    expect(parseCustomSlashCommandInput("  /speckit.plan  ", commandIds)).toEqual({
+      commandId: "speckit.plan",
+      args: "",
+    });
   });
 });
 

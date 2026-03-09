@@ -931,6 +931,8 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
               ]);
             }
           } finally {
+            const wasRunning = ctx.status === "running";
+            const stuckTurnId = ctx.currentTurnId;
             if (ctx.status !== "closed") {
               ctx.status = "closed";
               ctx.updatedAt = nowIso();
@@ -940,6 +942,37 @@ const makeClaudeCodeAdapter = (options?: ClaudeCodeAdapterLiveOptions) =>
               entry.resolve({ decision: "cancel" });
             }
             pendingApprovals.clear();
+
+            // If the stream ended while a turn was still active (no result
+            // message received), emit synthetic turn.completed + session.exited
+            // so the orchestration layer transitions out of "running".
+            if (wasRunning || stuckTurnId) {
+              const cleanupEvents: ProviderRuntimeEvent[] = [];
+              if (stuckTurnId) {
+                cleanupEvents.push({
+                  eventId: makeEventId(),
+                  provider: PROVIDER,
+                  threadId,
+                  createdAt: nowIso(),
+                  turnId: stuckTurnId,
+                  type: "turn.completed",
+                  payload: { state: "interrupted", stopReason: null },
+                } as ProviderRuntimeEvent);
+              }
+              cleanupEvents.push({
+                eventId: makeEventId(),
+                provider: PROVIDER,
+                threadId,
+                createdAt: nowIso(),
+                type: "session.exited",
+                payload: {
+                  reason: "SDK stream ended unexpectedly",
+                  exitKind: "error",
+                  recoverable: true,
+                },
+              } as ProviderRuntimeEvent);
+              emitEvents(cleanupEvents);
+            }
           }
         })().catch((outerError) => {
           ctx.status = "error";

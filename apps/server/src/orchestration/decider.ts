@@ -319,11 +319,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.turn.interrupt": {
-      yield* requireThread({
+      const threadToInterrupt = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      // Reject the interrupt if the session is not actively running a turn.
+      // This prevents a flood of redundant interrupt events when the user
+      // repeatedly clicks the interrupt button after a turn has already ended.
+      if (threadToInterrupt.session?.status !== "running") {
+        return [];
+      }
       return {
         ...withEventBase({
           aggregateKind: "thread",

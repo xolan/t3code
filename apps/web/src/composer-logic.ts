@@ -174,6 +174,36 @@ export function parseStandaloneComposerSlashCommand(
   return "default";
 }
 
+/**
+ * Parse a user-typed message as a custom slash command invocation.
+ *
+ * Given the raw prompt text and a list of known command IDs, returns
+ * the matched command ID and the trailing arguments (if any), or `null`
+ * if no custom command matches.
+ *
+ * Matching is longest-prefix-first so that `/speckit.tasks` doesn't
+ * shadow `/speckit.taskstoissues`.
+ */
+export function parseCustomSlashCommandInput(
+  text: string,
+  commandIds: readonly string[],
+): { commandId: string; args: string } | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("/")) return null;
+  const sorted = commandIds.toSorted((a, b) => b.length - a.length);
+  for (const id of sorted) {
+    const prefix = `/${id}`;
+    if (
+      trimmed === prefix ||
+      trimmed.startsWith(`${prefix} `) ||
+      trimmed.startsWith(`${prefix}\n`)
+    ) {
+      return { commandId: id, args: trimmed.slice(prefix.length).trim() };
+    }
+  }
+  return null;
+}
+
 export function replaceTextRange(
   text: string,
   rangeStart: number,
