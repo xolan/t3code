@@ -153,7 +153,6 @@ import {
   XIcon,
   CopyIcon,
   CheckIcon,
-  ZapIcon,
   ScrollTextIcon,
 } from "lucide-react";
 import { Button } from "./ui/button";
