@@ -3,6 +3,7 @@ import {
   CommandId,
   EventId,
   type OrchestrationEvent,
+  type OrchestrationThread,
   type ProviderModelOptions,
   type ProviderKind,
   type ProviderStartOptions,
@@ -13,6 +14,7 @@ import {
   type TurnId,
 } from "@t3tools/contracts";
 import { Cache, Cause, Duration, Effect, Layer, Option, Queue, Schema, Stream } from "effect";
+import * as Semaphore from "effect/Semaphore";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { GitCore } from "../../git/Services/GitCore.ts";
@@ -137,6 +139,16 @@ const make = Effect.gen(function* () {
     lookup: () => Effect.succeed(true),
   });
 
+  const threadMutexMap = new Map<string, Semaphore.Semaphore>();
+  const getThreadMutex = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const existing = threadMutexMap.get(threadId);
+      if (existing) return existing;
+      const sem = yield* Semaphore.make(1);
+      threadMutexMap.set(threadId, sem);
+      return sem;
+    });
+
   const hasHandledTurnStartRecently = (key: string) =>
     Cache.getOption(handledTurnStartKeys, key).pipe(
       Effect.flatMap((cached) =>
@@ -197,6 +209,64 @@ const make = Effect.gen(function* () {
     return readModel.threads.find((entry) => entry.id === threadId);
   });
 
+  /**
+   * Resolve any stale pending approvals for a thread by emitting cancel activities.
+   * This handles the case where approval promises were lost (e.g., server restart)
+   * but the approval.requested activities are still in the event store.
+   */
+  const cancelStalePendingApprovals = Effect.fnUntraced(function* (
+    thread: OrchestrationThread,
+    createdAt: string,
+  ) {
+    const resolvedRequestIds = new Set<string>();
+    for (const activity of thread.activities) {
+      const payload =
+        activity.payload && typeof activity.payload === "object"
+          ? (activity.payload as Record<string, unknown>)
+          : null;
+      const requestId = payload && typeof payload.requestId === "string" ? payload.requestId : null;
+      if (!requestId) continue;
+
+      if (activity.kind === "approval.requested") {
+        // Will be checked below
+      } else if (
+        activity.kind === "approval.resolved" ||
+        activity.kind === "provider.approval.respond.failed"
+      ) {
+        resolvedRequestIds.add(requestId);
+      }
+    }
+
+    for (const activity of thread.activities) {
+      if (activity.kind !== "approval.requested") continue;
+      const payload =
+        activity.payload && typeof activity.payload === "object"
+          ? (activity.payload as Record<string, unknown>)
+          : null;
+      const requestId = payload && typeof payload.requestId === "string" ? payload.requestId : null;
+      if (!requestId || resolvedRequestIds.has(requestId)) continue;
+
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: serverCommandId("stale-approval-cancel"),
+        threadId: thread.id,
+        activity: {
+          id: EventId.makeUnsafe(crypto.randomUUID()),
+          tone: "approval",
+          kind: "approval.resolved",
+          summary: "Stale approval cancelled",
+          payload: {
+            requestId,
+            decision: "cancel",
+          },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      });
+    }
+  });
+
   const ensureSessionForThread = Effect.fnUntraced(function* (
     threadId: ThreadId,
     createdAt: string,
@@ -215,7 +285,9 @@ const make = Effect.gen(function* () {
 
     const desiredRuntimeMode = thread.runtimeMode;
     const currentProvider: ProviderKind | undefined =
-      thread.session?.providerName === "codex" ? thread.session.providerName : undefined;
+      thread.session?.providerName === "codex" || thread.session?.providerName === "claudeCode"
+        ? thread.session.providerName
+        : undefined;
     const preferredProvider: ProviderKind | undefined = options?.provider ?? currentProvider;
     const desiredModel = options?.model ?? thread.model;
     const effectiveCwd = resolveThreadWorkspaceCwd({
@@ -265,6 +337,74 @@ const make = Effect.gen(function* () {
 
     const existingSessionThreadId =
       thread.session && thread.session.status !== "stopped" ? thread.id : null;
+
+    // T004/T009: Detect error-state or stale running sessions and recover
+    if (existingSessionThreadId && (thread.session?.status === "error" || thread.session?.status === "running")) {
+      const activeSession = yield* resolveActiveSession(existingSessionThreadId);
+      const adapterHasSession = activeSession !== undefined;
+      const needsRecovery =
+        thread.session.status === "error" ||
+        (thread.session.status === "running" && !adapterHasSession);
+
+      if (needsRecovery) {
+        // T006: Emit "starting" status with lastError cleared (T008)
+        yield* setThreadSession({
+          threadId,
+          session: {
+            threadId,
+            status: "starting",
+            providerName: thread.session.providerName,
+            runtimeMode: desiredRuntimeMode,
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        });
+
+        // T004: Tear down errored session, start fresh with resumeCursor (T005)
+        yield* providerService.stopSession({ threadId }).pipe(
+          Effect.catch(() => Effect.void),
+        );
+        const resumeCursor = activeSession?.resumeCursor ?? undefined;
+
+        const recoveryEffect = Effect.gen(function* () {
+          const recovered = yield* startProviderSession(
+            resumeCursor !== undefined ? { resumeCursor } : undefined,
+          );
+          yield* bindSessionToThread(recovered);
+          return recovered.threadId;
+        });
+
+        // T007: Timeout recovery and emit error on failure
+        const recovered = yield* recoveryEffect.pipe(
+          Effect.timeout(Duration.seconds(10)),
+          Effect.catchCause((cause) =>
+            Effect.gen(function* () {
+              const error = Cause.squash(cause);
+              const errorMessage = toErrorMessage(error);
+              yield* setThreadSession({
+                threadId,
+                session: {
+                  threadId,
+                  status: "error",
+                  providerName: thread.session!.providerName,
+                  runtimeMode: desiredRuntimeMode,
+                  activeTurnId: null,
+                  lastError: errorMessage,
+                  updatedAt: new Date().toISOString(),
+                },
+                createdAt: new Date().toISOString(),
+              });
+              return yield* Effect.failCause(cause);
+            }),
+          ),
+        );
+
+        return recovered;
+      }
+    }
+
     if (existingSessionThreadId) {
       const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
       const providerChanged =
@@ -374,6 +514,7 @@ const make = Effect.gen(function* () {
     readonly messageId: string;
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
+    readonly provider?: ProviderKind;
   }) {
     if (!input.branch || !input.worktreePath) {
       return;
@@ -400,6 +541,7 @@ const make = Effect.gen(function* () {
         cwd,
         message: input.messageText,
         ...(attachments.length > 0 ? { attachments } : {}),
+        ...(input.provider ? { provider: input.provider } : {}),
       })
       .pipe(
         Effect.catch((error) =>
@@ -448,6 +590,9 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    // Cancel any stale pending approvals from previous turns/sessions
+    yield* cancelStalePendingApprovals(thread, event.payload.createdAt);
+
     const message = thread.messages.find((entry) => entry.id === event.payload.messageId);
     if (!message || message.role !== "user") {
       yield* appendProviderFailureActivity({
@@ -468,23 +613,41 @@ const make = Effect.gen(function* () {
       messageId: message.id,
       messageText: message.text,
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+      ...(event.payload.provider ? { provider: event.payload.provider } : {}),
     }).pipe(Effect.forkScoped);
 
-    yield* sendTurnForThread({
-      threadId: event.payload.threadId,
-      messageText: message.text,
-      ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-      ...(event.payload.provider !== undefined ? { provider: event.payload.provider } : {}),
-      ...(event.payload.model !== undefined ? { model: event.payload.model } : {}),
-      ...(event.payload.modelOptions !== undefined
-        ? { modelOptions: event.payload.modelOptions }
-        : {}),
-      ...(event.payload.providerOptions !== undefined
-        ? { providerOptions: event.payload.providerOptions }
-        : {}),
-      interactionMode: event.payload.interactionMode,
-      createdAt: event.payload.createdAt,
-    });
+    // T003: Serialize recovery/turn-start per thread to prevent parallel recovery
+    const mutex = yield* getThreadMutex(event.payload.threadId);
+    yield* mutex.withPermits(1)(
+      sendTurnForThread({
+        threadId: event.payload.threadId,
+        messageText: message.text,
+        ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+        ...(event.payload.provider !== undefined ? { provider: event.payload.provider } : {}),
+        ...(event.payload.model !== undefined ? { model: event.payload.model } : {}),
+        ...(event.payload.modelOptions !== undefined
+          ? { modelOptions: event.payload.modelOptions }
+          : {}),
+        ...(event.payload.providerOptions !== undefined
+          ? { providerOptions: event.payload.providerOptions }
+          : {}),
+        interactionMode: event.payload.interactionMode,
+        createdAt: event.payload.createdAt,
+      }).pipe(
+        Effect.catchCause((cause) => {
+          const error = Cause.squash(cause);
+          const detail = toErrorMessage(error);
+          return appendProviderFailureActivity({
+            threadId: event.payload.threadId,
+            kind: "provider.turn.start.failed",
+            summary: "Provider turn start failed",
+            detail,
+            turnId: null,
+            createdAt: event.payload.createdAt,
+          });
+        }),
+      ),
+    );
   });
 
   const processTurnInterruptRequested = Effect.fnUntraced(function* (
@@ -507,7 +670,38 @@ const make = Effect.gen(function* () {
     }
 
     // Orchestration turn ids are not provider turn ids, so interrupt by session.
-    yield* providerService.interruptTurn({ threadId: event.payload.threadId });
+    const interruptResult = yield* providerService
+      .interruptTurn({ threadId: event.payload.threadId })
+      .pipe(
+        Effect.as("ok" as const),
+        Effect.catch(() => Effect.succeed("failed" as const)),
+      );
+
+    // After a crash/restart the provider may have no active turn to interrupt,
+    // so no runtime events (turn.completed, session.exited) will fire to clear
+    // the stale "running" state. Emit a session-set to unblock the thread.
+    if (thread.session?.status === "running") {
+      const freshThread = yield* resolveThread(event.payload.threadId);
+      const stillRunning = freshThread?.session?.status === "running";
+      if (stillRunning) {
+        yield* setThreadSession({
+          threadId: event.payload.threadId,
+          session: {
+            threadId: event.payload.threadId,
+            status: interruptResult === "ok" ? "ready" : "error",
+            providerName: thread.session.providerName,
+            runtimeMode: thread.session.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+            activeTurnId: null,
+            lastError:
+              interruptResult === "failed"
+                ? "Turn interrupt failed after session recovery"
+                : null,
+            updatedAt: event.payload.createdAt,
+          },
+          createdAt: event.payload.createdAt,
+        });
+      }
+    }
   });
 
   const processApprovalResponseRequested = Effect.fnUntraced(function* (

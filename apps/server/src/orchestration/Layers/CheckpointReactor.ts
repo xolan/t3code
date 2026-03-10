@@ -495,10 +495,23 @@ const make = Effect.gen(function* () {
 
     const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
     if (rolledBackTurns > 0) {
-      yield* providerService.rollbackConversation({
-        threadId: sessionRuntime.value.threadId,
-        numTurns: rolledBackTurns,
-      });
+      yield* providerService
+        .rollbackConversation({
+          threadId: sessionRuntime.value.threadId,
+          numTurns: rolledBackTurns,
+        })
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning(
+              "provider conversation rollback unavailable, filesystem checkpoint restored successfully",
+              {
+                threadId: event.payload.threadId,
+                turnCount: event.payload.turnCount,
+                detail: error.message,
+              },
+            ),
+          ),
+        );
     }
 
     const staleCheckpointRefs = thread.checkpoints

@@ -26,6 +26,7 @@ import {
   getDefaultModel,
   getDefaultReasoningEffort,
   getReasoningEffortOptions,
+  inferProviderFromModel,
   normalizeModelSlug,
   resolveModelSlugForProvider,
 } from "@t3tools/shared/model";
@@ -49,7 +50,11 @@ import {
 } from "@tanstack/react-virtual";
 import { gitBranchesQueryOptions, gitCreateWorktreeMutationOptions } from "~/lib/gitReactQuery";
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
-import { serverConfigQueryOptions, serverQueryKeys } from "~/lib/serverReactQuery";
+import {
+  serverConfigQueryOptions,
+  serverQueryKeys,
+  slashCommandsQueryOptions,
+} from "~/lib/serverReactQuery";
 
 import { isElectron } from "../env";
 import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
@@ -59,6 +64,7 @@ import {
   type ComposerTriggerKind,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
+  parseCustomSlashCommandInput,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
 } from "../composer-logic";
@@ -147,6 +153,7 @@ import {
   XIcon,
   CopyIcon,
   CheckIcon,
+  ScrollTextIcon,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -404,6 +411,14 @@ type ComposerCommandItem =
       model: ModelSlug;
       label: string;
       description: string;
+    }
+  | {
+      id: string;
+      type: "custom-command";
+      commandId: string;
+      label: string;
+      description: string;
+      body: string;
     };
 
 type SendPhase = "idle" | "preparing-worktree" | "sending-turn";
@@ -512,6 +527,9 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
       ) : null}
       {props.item.type === "slash-command" ? (
         <BotIcon className="size-4 text-muted-foreground/80" />
+      ) : null}
+      {props.item.type === "custom-command" ? (
+        <ScrollTextIcon className="size-4 text-muted-foreground/80" />
       ) : null}
       {props.item.type === "model" ? (
         <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
@@ -855,7 +873,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
     const lastVisitedAt = activeThread.lastVisitedAt ? Date.parse(activeThread.lastVisitedAt) : NaN;
     if (!Number.isNaN(lastVisitedAt) && lastVisitedAt >= turnCompletedAt) return;
 
-    markThreadVisited(activeThread.id);
+    markThreadVisited(activeThread.id, activeLatestTurn.completedAt);
   }, [
     activeThread?.id,
     activeThread?.lastVisitedAt,
@@ -875,12 +893,17 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const lockedProvider: ProviderKind | null = hasThreadStarted
     ? (sessionProvider ?? selectedProviderByThreadId ?? null)
     : null;
-  const selectedProvider: ProviderKind = lockedProvider ?? selectedProviderByThreadId ?? "codex";
+  const selectedProvider: ProviderKind =
+    lockedProvider ??
+    selectedProviderByThreadId ??
+    inferProviderFromModel(activeThread?.model ?? activeProject?.model) ??
+    "codex";
   const baseThreadModel = resolveModelSlugForProvider(
     selectedProvider,
     activeThread?.model ?? activeProject?.model ?? getDefaultModel(selectedProvider),
   );
-  const customModelsForSelectedProvider = settings.customCodexModels;
+  const customModelsForSelectedProvider =
+    selectedProvider === "claudeCode" ? settings.customClaudeCodeModels : settings.customCodexModels;
   const selectedModel = useMemo(() => {
     const draftModel = composerDraft.model;
     if (!draftModel) {
@@ -1270,6 +1293,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const effectivePathQuery = pathTriggerQuery.length > 0 ? debouncedPathQuery : "";
   const branchesQuery = useQuery(gitBranchesQueryOptions(gitCwd));
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
+  const slashCommandsQuery = useQuery(slashCommandsQueryOptions());
   const workspaceEntriesQuery = useQuery(
     projectSearchEntriesQueryOptions({
       cwd: gitCwd,
@@ -1316,13 +1340,30 @@ export default function ChatView({ threadId }: ChatViewProps) {
           description: "Switch this thread back to normal chat mode",
         },
       ] satisfies ReadonlyArray<Extract<ComposerCommandItem, { type: "slash-command" }>>;
+      const customCommandItems: Extract<ComposerCommandItem, { type: "custom-command" }>[] = (
+        slashCommandsQuery.data ?? []
+      ).map((cmd) => ({
+        id: `custom:${cmd.id}`,
+        type: "custom-command",
+        commandId: cmd.id,
+        label: cmd.name,
+        description: cmd.description,
+        body: cmd.body,
+      }));
+      const allItems: ComposerCommandItem[] = [...slashCommandItems, ...customCommandItems];
       const query = composerTrigger.query.trim().toLowerCase();
       if (!query) {
-        return [...slashCommandItems];
+        return allItems;
       }
-      return slashCommandItems.filter(
-        (item) => item.command.includes(query) || item.label.slice(1).includes(query),
-      );
+      return allItems.filter((item) => {
+        if (item.type === "slash-command") {
+          return item.command.includes(query) || item.label.slice(1).includes(query);
+        }
+        if (item.type === "custom-command") {
+          return item.commandId.includes(query) || item.label.slice(1).includes(query);
+        }
+        return false;
+      });
     }
 
     return searchableModelOptions
@@ -1341,7 +1382,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
         label: name,
         description: `${providerLabel} · ${slug}`,
       }));
-  }, [composerTrigger, searchableModelOptions, workspaceEntries]);
+  }, [composerTrigger, searchableModelOptions, slashCommandsQuery.data, workspaceEntries]);
   const composerMenuOpen = Boolean(composerTrigger);
   const activeComposerMenuItem = useMemo(
     () =>
@@ -1360,10 +1401,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const keybindings = serverConfigQuery.data?.keybindings ?? EMPTY_KEYBINDINGS;
   const availableEditors = serverConfigQuery.data?.availableEditors ?? EMPTY_AVAILABLE_EDITORS;
   const providerStatuses = serverConfigQuery.data?.providers ?? EMPTY_PROVIDER_STATUSES;
-  const activeProvider = activeThread?.session?.provider ?? "codex";
   const activeProviderStatus = useMemo(
-    () => providerStatuses.find((status) => status.provider === activeProvider) ?? null,
-    [activeProvider, providerStatuses],
+    () => providerStatuses.find((status) => status.provider === selectedProvider) ?? null,
+    [selectedProvider, providerStatuses],
   );
   const activeProjectCwd = activeProject?.cwd ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
@@ -2558,7 +2598,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       onAdvanceActivePendingUserInput();
       return;
     }
-    const trimmed = prompt.trim();
+    let trimmed = prompt.trim();
     if (showPlanFollowUpPrompt && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
@@ -2585,6 +2625,19 @@ export default function ChatView({ threadId }: ChatViewProps) {
       setComposerCursor(0);
       setComposerTrigger(null);
       return;
+    }
+    // Expand custom slash commands (e.g. /speckit.specify build auth)
+    // by replacing the raw command text with the command's body template.
+    const customCommands = slashCommandsQuery.data;
+    if (customCommands && customCommands.length > 0 && composerImages.length === 0) {
+      const commandIds = customCommands.map((cmd) => cmd.id);
+      const parsed = parseCustomSlashCommandInput(trimmed, commandIds);
+      if (parsed) {
+        const matchedCommand = customCommands.find((cmd) => cmd.id === parsed.commandId);
+        if (matchedCommand) {
+          trimmed = matchedCommand.body.replace(/\$ARGUMENTS/g, parsed.args);
+        }
+      }
     }
     if (!trimmed && composerImages.length === 0) return;
     if (!activeProject) return;
@@ -2699,7 +2752,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
       }
       const title = truncateTitle(titleSeed);
       let threadCreateModel: ModelSlug =
-        selectedModel || (activeProject.model as ModelSlug) || DEFAULT_MODEL_BY_PROVIDER.codex;
+        selectedModel ||
+        (activeProject.model as ModelSlug) ||
+        getDefaultModel(selectedProvider);
 
       if (isLocalDraftThread) {
         await api.orchestration.dispatchCommand({
@@ -2831,15 +2886,21 @@ export default function ChatView({ threadId }: ChatViewProps) {
     }
   };
 
+  const interruptInFlightRef = useRef(false);
   const onInterrupt = async () => {
     const api = readNativeApi();
-    if (!api || !activeThread) return;
-    await api.orchestration.dispatchCommand({
-      type: "thread.turn.interrupt",
-      commandId: newCommandId(),
-      threadId: activeThread.id,
-      createdAt: new Date().toISOString(),
-    });
+    if (!api || !activeThread || interruptInFlightRef.current) return;
+    interruptInFlightRef.current = true;
+    try {
+      await api.orchestration.dispatchCommand({
+        type: "thread.turn.interrupt",
+        commandId: newCommandId(),
+        threadId: activeThread.id,
+        createdAt: new Date().toISOString(),
+      });
+    } finally {
+      interruptInFlightRef.current = false;
+    }
   };
 
   const onRespondToApproval = useCallback(
@@ -3235,7 +3296,11 @@ export default function ChatView({ threadId }: ChatViewProps) {
       setComposerDraftProvider(activeThread.id, provider);
       setComposerDraftModel(
         activeThread.id,
-        resolveAppModelSelection(provider, settings.customCodexModels, model),
+        resolveAppModelSelection(
+          provider,
+          provider === "claudeCode" ? settings.customClaudeCodeModels : settings.customCodexModels,
+          model,
+        ),
       );
       scheduleComposerFocus();
     },
@@ -3246,6 +3311,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       setComposerDraftModel,
       setComposerDraftProvider,
       settings.customCodexModels,
+      settings.customClaudeCodeModels,
     ],
   );
   const onEffortSelect = useCallback(
@@ -3370,6 +3436,20 @@ export default function ChatView({ threadId }: ChatViewProps) {
         void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
         const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
           expectedText: expectedToken,
+        });
+        if (applied) {
+          setComposerHighlightedItemId(null);
+        }
+        return;
+      }
+      if (item.type === "custom-command") {
+        // Replace the slash trigger with the command body, substituting
+        // any text typed after the command name as $ARGUMENTS.
+        const userArgs = snapshot.value.slice(trigger.rangeEnd).trim();
+        const expandedBody = item.body.replace(/\$ARGUMENTS/g, userArgs);
+        // Replace the entire composer text with the expanded command body
+        const applied = applyPromptReplacement(0, snapshot.value.length, expandedBody, {
+          expectedText: snapshot.value,
         });
         if (applied) {
           setComposerHighlightedItemId(null);
@@ -3568,6 +3648,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
           availableEditors={availableEditors}
           diffToggleShortcutLabel={diffPanelShortcutLabel}
           gitCwd={gitCwd}
+          provider={selectedProvider}
           diffOpen={diffOpen}
           onRunProjectScript={(script) => {
             void runProjectScript(script);
@@ -4269,6 +4350,7 @@ interface ChatHeaderProps {
   availableEditors: ReadonlyArray<EditorId>;
   diffToggleShortcutLabel: string | null;
   gitCwd: string | null;
+  provider: ProviderKind;
   diffOpen: boolean;
   onRunProjectScript: (script: ProjectScript) => void;
   onAddProjectScript: (input: NewProjectScriptInput) => Promise<void>;
@@ -4289,6 +4371,7 @@ const ChatHeader = memo(function ChatHeader({
   availableEditors,
   diffToggleShortcutLabel,
   gitCwd,
+  provider,
   diffOpen,
   onRunProjectScript,
   onAddProjectScript,
@@ -4336,7 +4419,7 @@ const ChatHeader = memo(function ChatHeader({
             openInCwd={openInCwd}
           />
         )}
-        {activeProjectName && <GitActionsControl gitCwd={gitCwd} activeThreadId={activeThreadId} />}
+        {activeProjectName && <GitActionsControl gitCwd={gitCwd} activeThreadId={activeThreadId} provider={provider} />}
         <Tooltip>
           <TooltipTrigger
             render={
@@ -4441,7 +4524,11 @@ const ComposerPendingApprovalPanel = memo(function ComposerPendingApprovalPanel(
       ? "Command approval requested"
       : approval.requestKind === "file-read"
         ? "File-read approval requested"
-        : "File-change approval requested";
+        : approval.requestKind === "file-change"
+          ? "File-change approval requested"
+          : approval.detail
+            ? `Approval requested: ${approval.detail}`
+            : "Approval requested";
 
   return (
     <div className="px-4 py-3.5 sm:px-5 sm:py-4">
@@ -5487,7 +5574,9 @@ const MessagesTimeline = memo(function MessagesTimeline({
       {row.kind === "message" &&
         row.message.role === "assistant" &&
         (() => {
-          const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+          // Skip rendering empty non-streaming assistant messages (tool-only segments)
+          if (!row.message.text && !row.message.streaming) return null;
+          const messageText = row.message.text || "";
           return (
             <>
               {row.showCompletionDivider && (
@@ -5652,7 +5741,7 @@ function isAvailableProviderOption(option: (typeof PROVIDER_OPTIONS)[number]): o
   label: string;
   available: true;
 } {
-  return option.available && option.value !== "claudeCode";
+  return option.available;
 }
 
 const AVAILABLE_PROVIDER_OPTIONS = PROVIDER_OPTIONS.filter(isAvailableProviderOption);
@@ -5664,9 +5753,11 @@ const COMING_SOON_PROVIDER_OPTIONS = [
 
 function getCustomModelOptionsByProvider(settings: {
   customCodexModels: readonly string[];
+  customClaudeCodeModels: readonly string[];
 }): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
   return {
     codex: getAppModelOptions("codex", settings.customCodexModels),
+    claudeCode: getAppModelOptions("claudeCode", settings.customClaudeCodeModels),
   };
 }
 

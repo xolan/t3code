@@ -151,6 +151,11 @@ export function createDevRunnerEnv({
 
     const output: NodeJS.ProcessEnv = {
       ...baseEnv,
+      // Turbo runs each workspace task from that workspace's directory, so
+      // process.cwd() inside the server would be apps/server/ rather than
+      // the monorepo root. T3CODE_CWD tells the server the real workspace
+      // root so that features like .claude/commands discovery work in dev.
+      T3CODE_CWD: process.cwd(),
       T3CODE_PORT: String(serverPort),
       PORT: String(webPort),
       ELECTRON_RENDERER_PORT: String(webPort),

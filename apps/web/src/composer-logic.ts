@@ -10,7 +10,7 @@ export interface ComposerTrigger {
   rangeEnd: number;
 }
 
-const SLASH_COMMANDS: readonly ComposerSlashCommand[] = ["model", "plan", "default"];
+const _SLASH_COMMANDS: readonly ComposerSlashCommand[] = ["model", "plan", "default"];
 
 function clampCursor(text: string, cursor: number): number {
   if (!Number.isFinite(cursor)) return text.length;
@@ -126,15 +126,15 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
           rangeEnd: cursor,
         };
       }
-      if (SLASH_COMMANDS.some((command) => command.startsWith(commandQuery.toLowerCase()))) {
-        return {
-          kind: "slash-command",
-          query: commandQuery,
-          rangeStart: lineStart,
-          rangeEnd: cursor,
-        };
-      }
-      return null;
+      // Always open the slash-command menu for any `/word` prefix — the
+      // autocomplete list includes both built-in and custom (spec-kit) commands,
+      // so filtering happens downstream rather than gating on a static list.
+      return {
+        kind: "slash-command",
+        query: commandQuery,
+        rangeStart: lineStart,
+        rangeEnd: cursor,
+      };
     }
 
     const modelMatch = /^\/model(?:\s+(.*))?$/.exec(linePrefix);
@@ -172,6 +172,36 @@ export function parseStandaloneComposerSlashCommand(
   const command = match[1]?.toLowerCase();
   if (command === "plan") return "plan";
   return "default";
+}
+
+/**
+ * Parse a user-typed message as a custom slash command invocation.
+ *
+ * Given the raw prompt text and a list of known command IDs, returns
+ * the matched command ID and the trailing arguments (if any), or `null`
+ * if no custom command matches.
+ *
+ * Matching is longest-prefix-first so that `/speckit.tasks` doesn't
+ * shadow `/speckit.taskstoissues`.
+ */
+export function parseCustomSlashCommandInput(
+  text: string,
+  commandIds: readonly string[],
+): { commandId: string; args: string } | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("/")) return null;
+  const sorted = commandIds.toSorted((a, b) => b.length - a.length);
+  for (const id of sorted) {
+    const prefix = `/${id}`;
+    if (
+      trimmed === prefix ||
+      trimmed.startsWith(`${prefix} `) ||
+      trimmed.startsWith(`${prefix}\n`)
+    ) {
+      return { commandId: id, args: trimmed.slice(prefix.length).trim() };
+    }
+  }
+  return null;
 }
 
 export function replaceTextRange(
